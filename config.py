@@ -6,12 +6,14 @@ from qdrant_client import QdrantClient
 from langchain_neo4j import Neo4jGraph
 from langchain_qdrant import QdrantVectorStore
 from dotenv import load_dotenv
-from langgraph.checkpoint.redis import RedisSaver
-
+from langgraph.checkpoint.memory import MemorySaver
 from langchain.chat_models import init_chat_model
 from .standard_repository import StandardEpisodicRepository, StandardGraphRepository
 
 load_dotenv()
+
+# --- Memory Repositories (Open Core Abstraction Layer) ---
+DB_MODE = os.getenv("DB_MODE", "LITE") # OPTIONS: STANDARD, LITE
 
 # --- Open Core Configuration ---
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "google_genai")
@@ -42,10 +44,13 @@ embeddings = GoogleGenerativeAIEmbeddings(
     google_api_key=os.getenv("GOOGLE_API_KEY")
 )
 
-qdrant_client = QdrantClient(
-    url=os.getenv("QDRANT_URL", "http://localhost:6333"),
-    api_key=os.getenv("QDRANT_API_KEY", None)
-)
+if DB_MODE == "STANDARD":
+    qdrant_client = QdrantClient(
+        url=os.getenv("QDRANT_URL", "http://localhost:6333"),
+        api_key=os.getenv("QDRANT_API_KEY", None)
+    )
+else:
+    qdrant_client = None
 
 def get_vector_store(collection_name: str) -> QdrantVectorStore:
     return QdrantVectorStore(
@@ -54,15 +59,15 @@ def get_vector_store(collection_name: str) -> QdrantVectorStore:
         embedding=embeddings
     )
 
-def get_neo4j_graph() -> Neo4jGraph:
+def get_neo4j_graph() -> Optional[Neo4jGraph]:
+    if DB_MODE == "LITE": return None
     return Neo4jGraph(
         url=os.getenv("NEO4J_URI", "bolt://localhost:7687"),
         username=os.getenv("NEO4J_USERNAME", "neo4j"),
         password=os.getenv("NEO4J_PASSWORD", "password")
     )
 
-# --- Memory Repositories (Open Core Abstraction Layer) ---
-DB_MODE = os.getenv("DB_MODE", "STANDARD") # OPTIONS: STANDARD, LITE
+# (DB_MODE is moved up)
 
 if DB_MODE == "LITE":
     from .standard_lite_repository import StandardLiteEpisodicRepository, StandardLiteGraphRepository
@@ -74,9 +79,13 @@ else:
     graph_repo = StandardGraphRepository(get_neo4j_graph())
 
 # Redis 'Warm State' Buffer Connection
-redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
-redis_client = redis.Redis.from_url(redis_url, decode_responses=True)
-
-# LangGraph Redis Checkpointer
-# This saves the entire cognitive state (Mind) for persistence
-checkpointer = RedisSaver.from_conn_string(redis_url)
+if DB_MODE == "STANDARD":
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+    redis_client = redis.Redis.from_url(redis_url, decode_responses=True)
+    # LangGraph Redis Checkpointer
+    from langgraph.checkpoint.redis import RedisSaver
+    checkpointer = RedisSaver.from_conn_string(redis_url)
+else:
+    redis_client = None
+    # LangGraph Memory Checkpointer (Zero-Infra)
+    checkpointer = MemorySaver()
